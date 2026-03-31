@@ -18,6 +18,9 @@ public class Promotion {
     @Column(nullable = false, unique = true)
     private String nom;
 
+    @Column(name = "lien_ical")
+    private String lienIcal;
+
     public Long getId() {
         return id;
     }
@@ -32,5 +35,13 @@ public class Promotion {
 
     public void setNom(String nom) {
         this.nom = nom;
+    }
+
+    public String getLienIcal() {
+        return lienIcal;
+    }
+
+    public void setLienIcal(String lienIcal) {
+        this.lienIcal = lienIcal;
     }
 }
