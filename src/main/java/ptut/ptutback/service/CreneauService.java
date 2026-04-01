@@ -5,12 +5,14 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -19,6 +21,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import ptut.ptutback.dao.CreneauRepository;
 import ptut.ptutback.dao.PromotionRepository;
@@ -38,7 +41,9 @@ public class CreneauService {
     public CreneauService(CreneauRepository creneauRepository, PromotionRepository promotionRepository) {
         this.creneauRepository = creneauRepository;
         this.promotionRepository = promotionRepository;
-        this.httpClient = HttpClient.newBuilder().build();
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(8))
+                .build();
     }
 
     public List<Creneau> findAll() {
@@ -49,25 +54,28 @@ public class CreneauService {
         return creneauRepository.save(creneau);
     }
 
+    @Transactional
     public ImportResult importFromPromotionLinks(boolean replaceExisting) {
         List<Promotion> promotions = promotionRepository.findAll();
-        List<Creneau> importedCreneaux = new ArrayList<>();
-        List<String> warnings = new ArrayList<>();
+        List<Creneau> importedCreneaux = Collections.synchronizedList(new ArrayList<>());
+        List<String> warnings = Collections.synchronizedList(new ArrayList<>());
 
         if (replaceExisting) {
-            creneauRepository.deleteAllInBatch();
+            creneauRepository.truncateAll();
         }
 
-        int linkedPromotionCount = 0;
+        List<Promotion> linkedPromotions = new ArrayList<>();
         for (Promotion promotion : promotions) {
             String lienIcal = promotion.getLienIcal();
             if (lienIcal == null || lienIcal.isBlank()) {
                 continue;
             }
+            linkedPromotions.add(promotion);
+        }
 
-            linkedPromotionCount++;
+        linkedPromotions.parallelStream().forEach(promotion -> {
             try {
-                List<Creneau> promotionCreneaux = parseIcsFromUrl(lienIcal);
+                List<Creneau> promotionCreneaux = parseIcsFromUrl(promotion.getLienIcal());
                 for (Creneau creneau : promotionCreneaux) {
                     creneau.setClasse(promotion.getNom());
                 }
@@ -78,18 +86,19 @@ public class CreneauService {
                 Thread.currentThread().interrupt();
                 warnings.add("Promotion " + promotion.getNom() + " : interruption pendant l'import ICS");
             }
-        }
+        });
 
         creneauRepository.saveAll(importedCreneaux);
-        return new ImportResult(promotions.size(), linkedPromotionCount, importedCreneaux.size(), warnings);
+        return new ImportResult(promotions.size(), linkedPromotions.size(), importedCreneaux.size(), warnings);
     }
 
+    @Transactional
     public ImportResult importFromSingleIcalLink(String iCalUrl, boolean replaceExisting) {
         List<Creneau> importedCreneaux = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
 
         if (replaceExisting) {
-            creneauRepository.deleteAllInBatch();
+            creneauRepository.truncateAll();
         }
 
         try {
@@ -106,7 +115,10 @@ public class CreneauService {
     }
 
     private List<Creneau> parseIcsFromUrl(String url) throws IOException, InterruptedException {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofSeconds(20))
+            .GET()
+            .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
