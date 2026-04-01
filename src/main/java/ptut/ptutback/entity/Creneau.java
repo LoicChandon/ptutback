@@ -1,12 +1,13 @@
 package ptut.ptutback.entity;
 
+import java.time.LocalDateTime;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "creneau")
@@ -34,6 +35,8 @@ public class Creneau {
 
 	@Column(name = "course_type")
 	private String courseType;
+
+	private String classe;
 
 	@Column(columnDefinition = "TEXT")
 	private String description;
@@ -100,6 +103,14 @@ public class Creneau {
 
 	public void setCourseType(String courseType) {
 		this.courseType = courseType;
+	}
+
+	public String getClasse() {
+		return classe;
+	}
+
+	public void setClasse(String classe) {
+		this.classe = classe;
 	}
 
 	public String getDescription() {
