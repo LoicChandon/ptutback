@@ -61,7 +61,7 @@ public class CreneauService {
         List<String> warnings = Collections.synchronizedList(new ArrayList<>());
 
         if (replaceExisting) {
-            creneauRepository.truncateAll();
+            creneauRepository.deleteFutureCreneaux(LocalDateTime.now());
         }
 
         List<Promotion> linkedPromotions = new ArrayList<>();
@@ -98,7 +98,7 @@ public class CreneauService {
         List<String> warnings = new ArrayList<>();
 
         if (replaceExisting) {
-            creneauRepository.truncateAll();
+            creneauRepository.deleteFutureCreneaux(LocalDateTime.now());
         }
 
         try {
@@ -250,7 +250,11 @@ public class CreneauService {
             return null;
         }
 
-        String[] lines = description.split("\\r?\\n");
+        String normalizedDescription = description
+                .replace("\\n", "\n")
+                .replace("\\N", "\n");
+
+        String[] lines = normalizedDescription.split("\\r?\\n");
         for (int i = 1; i < lines.length; i++) {
             String current = lines[i].trim().toLowerCase(Locale.ROOT);
             if (current.contains("export")) {
@@ -310,10 +314,10 @@ public class CreneauService {
         }
 
         return value
-                .replace("\\\\n", "\n")
-                .replace("\\\\N", "\n")
-                .replace("\\\\,", ",")
-                .replace("\\\\;", ";")
+                .replace("\\n", "\n")
+                .replace("\\N", "\n")
+                .replace("\\,", ",")
+                .replace("\\;", ";")
                 .trim();
     }
 
