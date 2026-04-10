@@ -14,11 +14,14 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,12 +40,15 @@ public class CreneauService {
 
     private static final Pattern GROUP_PATTERN = Pattern.compile("(GRP[- ]?\\d+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern COURSE_TYPE_PATTERN = Pattern.compile("\\b(CM|TD|TP)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PROMOTION_PATTERN = Pattern.compile("\\b(FIE[1-5]|FIA[3-5])\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SHORT_PROMOTION_PATTERN = Pattern.compile("\\b([EA][1-5])\\b", Pattern.CASE_INSENSITIVE);
 
     public CreneauService(CreneauRepository creneauRepository, PromotionRepository promotionRepository) {
         this.creneauRepository = creneauRepository;
         this.promotionRepository = promotionRepository;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(8))
+            .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
     }
 
@@ -75,7 +81,7 @@ public class CreneauService {
 
         linkedPromotions.parallelStream().forEach(promotion -> {
             try {
-                List<Creneau> promotionCreneaux = parseIcsFromUrl(promotion.getLienIcal());
+                List<Creneau> promotionCreneaux = parseIcsFromUrl(promotion.getLienIcal(), promotion.getNom());
                 for (Creneau creneau : promotionCreneaux) {
                     creneau.setClasse(promotion.getNom());
                 }
@@ -88,8 +94,9 @@ public class CreneauService {
             }
         });
 
-        creneauRepository.saveAll(importedCreneaux);
-        return new ImportResult(promotions.size(), linkedPromotions.size(), importedCreneaux.size(), warnings);
+        List<Creneau> deduplicatedCreneaux = deduplicateCreneaux(importedCreneaux);
+        creneauRepository.saveAll(deduplicatedCreneaux);
+        return new ImportResult(promotions.size(), linkedPromotions.size(), deduplicatedCreneaux.size(), warnings);
     }
 
     @Transactional
@@ -115,6 +122,10 @@ public class CreneauService {
     }
 
     private List<Creneau> parseIcsFromUrl(String url) throws IOException, InterruptedException {
+        return parseIcsFromUrl(url, null);
+    }
+
+    private List<Creneau> parseIcsFromUrl(String url, String expectedPromotion) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
             .timeout(Duration.ofSeconds(20))
             .GET()
@@ -125,10 +136,10 @@ public class CreneauService {
             throw new IOException("HTTP " + response.statusCode() + " pendant la récupération du fichier ICS");
         }
 
-        return parseIcsContent(response.body());
+        return parseIcsContent(response.body(), expectedPromotion);
     }
 
-    private List<Creneau> parseIcsContent(String content) {
+    private List<Creneau> parseIcsContent(String content, String expectedPromotion) {
         List<String> lines = unfoldLines(content);
         List<Creneau> result = new ArrayList<>();
 
@@ -142,7 +153,7 @@ public class CreneauService {
             if ("END:VEVENT".equals(line)) {
                 if (eventFields != null) {
                     Creneau creneau = toCreneau(eventFields);
-                    if (creneau != null) {
+                    if (creneau != null && shouldKeepForPromotion(eventFields, expectedPromotion)) {
                         result.add(creneau);
                     }
                 }
@@ -243,6 +254,87 @@ public class CreneauService {
         }
 
         return cleaned.isBlank() ? null : cleaned;
+    }
+
+    private boolean shouldKeepForPromotion(Map<String, String> fields, String expectedPromotion) {
+        if (expectedPromotion == null || expectedPromotion.isBlank()) {
+            return true;
+        }
+
+        Set<String> promotionCodes = extractPromotionCodes(fields.get("SUMMARY"), fields.get("DESCRIPTION"));
+        if (promotionCodes.isEmpty()) {
+            return false;
+        }
+
+        return promotionCodes.contains(expectedPromotion.toUpperCase(Locale.ROOT));
+    }
+
+    private Set<String> extractPromotionCodes(String summary, String description) {
+        Set<String> codes = new HashSet<>();
+        String safeSummary = unescapeIcsText(summary) == null ? "" : unescapeIcsText(summary);
+        String safeDescription = unescapeIcsText(description) == null ? "" : unescapeIcsText(description);
+        String combined = safeSummary + "\n" + safeDescription;
+
+        // 1) Code court dans SUMMARY : E1..E5 => FIE1..FIE5, A3..A5 => FIA3..FIA5
+        Matcher shortCodeMatcher = SHORT_PROMOTION_PATTERN.matcher(safeSummary);
+        while (shortCodeMatcher.find()) {
+            String mapped = mapShortPromotionCode(shortCodeMatcher.group(1));
+            if (mapped != null) {
+                codes.add(mapped);
+            }
+        }
+
+        // 2) Code complet dans DESCRIPTION/SUMMARY : FIE1, FIA4, etc.
+        Matcher matcher = PROMOTION_PATTERN.matcher(combined);
+        while (matcher.find()) {
+            codes.add(matcher.group(1).toUpperCase(Locale.ROOT));
+        }
+
+        return codes;
+    }
+
+    private String mapShortPromotionCode(String shortCode) {
+        if (shortCode == null || shortCode.isBlank()) {
+            return null;
+        }
+
+        String normalized = shortCode.toUpperCase(Locale.ROOT);
+        if (normalized.length() != 2) {
+            return null;
+        }
+
+        char track = normalized.charAt(0);
+        char year = normalized.charAt(1);
+
+        if (track == 'E' && year >= '1' && year <= '5') {
+            return "FIE" + year;
+        }
+
+        if (track == 'A' && year >= '3' && year <= '5') {
+            return "FIA" + year;
+        }
+
+        return null;
+    }
+
+    private List<Creneau> deduplicateCreneaux(List<Creneau> creneaux) {
+        Map<String, Creneau> uniqueByKey = new HashMap<>();
+
+        for (Creneau creneau : creneaux) {
+            String key = String.join("|",
+                    safeKeyPart(creneau.getClasse()),
+                    safeKeyPart(creneau.getStartTime() == null ? null : creneau.getStartTime().toString()),
+                    safeKeyPart(creneau.getEndTime() == null ? null : creneau.getEndTime().toString()),
+                    safeKeyPart(creneau.getTitle()),
+                    safeKeyPart(creneau.getLocation()));
+            uniqueByKey.putIfAbsent(key, creneau);
+        }
+
+        return uniqueByKey.values().stream().collect(Collectors.toList());
+    }
+
+    private String safeKeyPart(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
     private String extractProfessor(String description) {
